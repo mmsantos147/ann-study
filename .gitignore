@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.jpg
+*.keras
+*.pth
+*.zip
 
 # C extensions
 *.so

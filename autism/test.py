@@ -5,7 +5,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import transforms
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, random_split, ConcatDataset
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 
 class CustomDataset(Dataset):
@@ -27,13 +28,13 @@ class CustomDataset(Dataset):
                 try:
                     image_path = os.path.join(path, file)
                     image = Image.open(image_path).convert('RGB')
-                    label = 1 if 'autistic' in path.lower() else 0
+                    label = 0 if 'non_autistic' in path.lower() else 1
 
                     if self.transform:
                         image = self.transform(image)
 
                     self.images.append(image)
-                    self.labels.append(label)
+                    self.labels.append(float(label))  # Garantir que o rótulo seja float
                 except Exception as e:
                     print(f"Error processing image '{file}': {e}")
 
@@ -51,19 +52,19 @@ class CNNModel(nn.Module):
             nn.Conv2d(3, 32, kernel_size=3),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2),
-            
+
             nn.Conv2d(32, 64, kernel_size=3),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2),
-            
+
             nn.Conv2d(64, 128, kernel_size=3),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2),
-            
+
             nn.Conv2d(128, 256, kernel_size=3),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2),
-            
+
             nn.Conv2d(256, 512, kernel_size=3),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2),
@@ -93,38 +94,41 @@ class CNNModel(nn.Module):
         x = self.fc_layers(x)
         return x
 
+
 def evaluate(model, dataloader, device, threshold=0.5):
     """
     Avalia o modelo em um conjunto de dados.
     """
     model.eval()
     correct, total = 0, 0
+    all_labels = []
+    all_predictions = []
+
     with torch.no_grad():
-        for batch_idx, (images, labels) in enumerate(dataloader):
-            images, labels = images.to(device), labels.to(device)
-
-            # Verifique as formas das entradas
-            print(f"Batch {batch_idx + 1}:")
-            print(f"Images shape: {images.shape}")
-            print(f"Labels shape: {labels.shape}")
-
+        for images, labels in dataloader:
+            images, labels = images.to(device), labels.to(device).float()
             outputs = model(images)
-            print(f"Outputs shape: {outputs.shape}")
-            print(f"Outputs (raw): {outputs[:5]}")  # Exibe os primeiros 5 resultados brutos
-
             predictions = (outputs.squeeze(1) > threshold).float()
-            print(f"Predictions: {predictions[:5]}")
-            print(f"Labels: {labels[:5]}")
 
             correct += (predictions == labels).sum().item()
             total += labels.size(0)
 
-            # Opcional: Acompanhe a acurácia parcial
-            print(f"Partial accuracy after batch {batch_idx + 1}: {correct / total * 100:.2f}%")
+            all_labels.extend(labels.cpu().numpy())
+            all_predictions.extend(predictions.cpu().numpy())
 
     accuracy = correct / total * 100
-    print(f"Final Accuracy: {accuracy:.2f}%")
+    print(f"Final Accuracy: {accuracy:.5f}%")
 
+    # Plotando a matriz de confusão
+    cm = plot_confusion_matrix(all_labels, all_predictions)
+    print("Confusion Matrix:\n", cm)
+
+def plot_confusion_matrix(labels, predictions):
+    from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+    cm = confusion_matrix(labels, predictions, labels=[0, 1])  # Especifica as classes [0, 1]
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Non-Autistic", "Autistic"])
+    disp.plot(cmap="Blues")
+    return cm
 
 
 def main():
@@ -138,9 +142,9 @@ def main():
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
-    train_a = CustomDataset("autism\\images\\train\\autistic", hw, transform=transform)
-    train_na = CustomDataset("autism\\images\\train\\non_autistic", hw, transform=transform)
-    train_dataset = train_a + train_na
+    train_a = CustomDataset("autism/images/train/autistic", hw, transform=transform)
+    train_na = CustomDataset("autism/images/train/non_autistic", hw, transform=transform)
+    train_dataset = ConcatDataset([train_a, train_na])
 
     # Split into training and validation
     train_size = int(0.7 * len(train_dataset))
@@ -158,19 +162,41 @@ def main():
         command = input("'1' Train the model \n'2' Evaluate autistic images \n'3' Evaluate non-autistic images \n'4' Save the model \n'5' Load a model \n'0' Exit: ")
 
         if command == '1':
-            print("Training the model...")
-            model.train()
-            for epoch in range(10):
-                total_loss = 0
-                for images, labels in train_loader:
-                    images, labels = images.to(device), labels.to(device).float()
-                    optimizer.zero_grad()
-                    outputs = model(images)
-                    loss = criterion(outputs, labels.unsqueeze(1))
-                    loss.backward()
-                    optimizer.step()
-                    total_loss += loss.item()
-                print(f"Epoch {epoch + 1}, Loss: {total_loss:.4f}")
+                print("Training the model...")
+                for epoch in range(10):
+                    model.train()
+                    total_loss, train_correct, train_total = 0, 0, 0
+                    for images, labels in train_loader:
+                        images, labels = images.to(device), labels.to(device).float()
+                        optimizer.zero_grad()
+                        outputs = model(images)
+                        loss = criterion(outputs.squeeze(1), labels)
+                        loss.backward()
+                        optimizer.step()
+                        total_loss += loss.item()
+
+                        # Calculate training accuracy
+                        predictions = (outputs.squeeze(1) > 0.5).float()
+                        train_correct += (predictions == labels).sum().item()
+                        train_total += labels.size(0)
+
+                    train_accuracy = train_correct / train_total * 100
+
+                    # Validation
+                    model.eval()
+                    val_loss, val_correct, val_total = 0, 0, 0
+                    with torch.no_grad():
+                        for images, labels in val_loader:
+                            images, labels = images.to(device), labels.to(device).float()
+                            outputs = model(images)
+                            val_loss += criterion(outputs.squeeze(1), labels).item()
+                            predictions = (outputs.squeeze(1) > 0.5).float()
+                            val_correct += (predictions == labels).sum().item()
+                            val_total += labels.size(0)
+                    val_accuracy = val_correct / val_total * 100
+
+                    print(f"Epoch {epoch + 1}, Loss: {total_loss:.5f}, Accuracy: {train_accuracy:.5f}%, Validation Loss: {val_loss:.5f}, Validation Accuracy: {val_accuracy:.5f}%")
+
 
         elif command == '2':
             print("Evaluating autistic images...")
@@ -185,7 +211,10 @@ def main():
             evaluate(model, eval_loader, device)
 
         elif command == '4':
-            torch.save(model.state_dict(), 'autism/neural_networks/model.pth')
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, 'autism/neural_networks/model.pth')
             print("Model saved.")
 
         elif command == '5':
@@ -198,7 +227,9 @@ def main():
                 for i, m in enumerate(models, 1):
                     print(f"{i}. {m}")
                 choice = int(input("Choose a model to load: ")) - 1
-                model.load_state_dict(torch.load(os.path.join(models_path, models[choice])))
+                checkpoint = torch.load(os.path.join(models_path, models[choice]))
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 model.to(device)
                 print(f"Model '{models[choice]}' loaded.")
             except Exception as e:

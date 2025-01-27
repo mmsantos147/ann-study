@@ -93,11 +93,11 @@ def evaluate_images(path, model, hw, threshold=0.5):
 
     total = len(images)
     correct, incorrect = 0, 0
-    expected_label = 'autistic' if 'autistic' in path.lower() else 'non_autistic'
+    expected_label = 'non_autistic' if 'non_autistic' in path.lower() else 'autistic'
 
     for idx, image in enumerate(images):
         prediction = model.predict(image.reshape(1, hw, hw, 3))[0][0]
-        classification = 'autistic' if prediction > threshold else 'non_autistic'
+        classification = 'non_autistic' if prediction < threshold else 'autistic'
         is_correct = classification == expected_label
 
         if is_correct:
